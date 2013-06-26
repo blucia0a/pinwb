@@ -1,5 +1,5 @@
 all: test.c
-	gcc -g -O0 -otest test.c
+	gcc -static -g -O0 -o test test.c
 
 clean:
 	-rm test

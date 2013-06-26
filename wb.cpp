@@ -20,19 +20,19 @@ public:
 
   ADDRINT realAddr;
   ADDRINT realValue;
-  ADDRINT timestamp;
+  UINT32 size;
 
   
   WriteBufferEntry(){
     this->realAddr = NULL;
     this->realValue = NULL;
-    this->timestamp = 0;
+    this->size = 0;
   }
 
-  WriteBufferEntry(ADDRINT a, ADDRINT v, unsigned long t){
+  WriteBufferEntry(ADDRINT a, ADDRINT v, UINT32 size){
     this->realAddr = a;
     this->realValue = v;
-    this->timestamp = t;
+    this->size = size;
   }
 
   ADDRINT getAddr(){
@@ -53,16 +53,6 @@ public:
 
 };
 
-
-namespace __gnu_cxx {
-template<> struct hash<ADDRINT> {
-  size_t operator()(const ADDRINT& k) const {
-    hash<unsigned long> hash_fn;
-    return hash_fn( (unsigned long) k);
-  }
-};
-}
-
 class WriteBuffer{
 
   unsigned long timestamp;
@@ -80,74 +70,54 @@ public:
 
   }
 
-  ADDRINT handleAccess( ADDRINT origEA, UINT32 access, ADDRINT instadd ){
+  ADDRINT handleAccess( ADDRINT origEA, UINT32 access, UINT32 asize, ADDRINT instadd){
 
-      fprintf(stderr,"ADDR = %016llx \n", origEA);
-      /*TODO: Need to decide here if this address is one of ours or one from
-              the program.  Condition on whether the address is found in a set
-              of all addresses that make up the write buffer?  Better way?  
-
-              Question: Does Pin use a different bunch of addresses than the
-                        program uses? 
-      */
-      if( this->bufferLocations.find( origEA ) != this->bufferLocations.end() ){
-        fprintf(stderr,"The program took a reference to the buffer location at %llx\n",origEA);
-      }
-     
+      //REG_SEG_GS/FS_BASE
       if( this->map.find( origEA ) != this->map.end() ){
-        fprintf(stderr,"found it!\n");
 
         /*It is in the Write Buffer*/
         if( access == 1 ){
         /*It was a read*/
-  
-            fprintf(stderr,"[0x%016llx] = 0x%016llx\n",origEA,this->map[ origEA ]->realValue);
-            return (ADDRINT)(&(this->map[ origEA ]->realValue));
-
         } else if ( access == 2 ){
         /*It was a write*/
-            return (ADDRINT)(&(this->map[ origEA ]->realValue));
-            //return origEA; 
-
         } else if ( access == 3 ){
         /*It was a read/write*/
-            return (ADDRINT)(&(this->map[ origEA ]->realValue));
-            //return origEA; 
-   
         }else{
 
-          fprintf(stderr,"Unknown access type %lu\n",(unsigned long)access);
-          return (ADDRINT)(&(this->map[ origEA ]->realValue));
+          fprintf(stderr,"WARNING:Unknown access type %lu\n",(unsigned long)access);
 
         }
+      
 
       } else {
 
-        fprintf(stderr,"did not find it!\n");
-
         /*It was not in the write buffer*/
-        WriteBufferEntry *wbe = new WriteBufferEntry(origEA, *((ADDRINT*)origEA), this->timestamp++);
+        if( access == 1 ){
+
+          //fprintf(stderr,"Warning: Reading Uninitialized Memory! %016llx @ %016llx\n",origEA, instadd);
+          return origEA;
+
+        }
+
+        ADDRINT wbStorage = (ADDRINT)malloc(asize); 
         
-        fprintf(stderr,"made an entry!\n");
-
-        this->map[ origEA ] = wbe;
+        WriteBufferEntry *wbe = new WriteBufferEntry(origEA, wbStorage, asize);
  
-        fprintf(stderr,"(uninit) [0x%016llx] = 0x%016llx\n",origEA,*((ADDRINT*)origEA));
+        this->map[ origEA ] = wbe;
 
-        ADDRINT bufferLocation = (ADDRINT)(&(this->map[ origEA ]->realValue));
-        this->bufferLocations.insert( bufferLocation ); 
 
-        return bufferLocation;
 
       }
+      
+      assert( asize <= this->map[ origEA ]->size );
+      //fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==1?"R":(access==2?"W":"R/W")),origEA,this->map[ origEA ]->realValue,asize,instadd);
+      return this->map[ origEA ]->realValue;
 
-  fprintf(stderr,"GOT HERE.  Shouldn't have.  Going to abort.\n");
-  return (ADDRINT)NULL;
+
   }
 
 };
 
-REG regs[3];
 WriteBuffer **bufs;
 #define MAX_NTHREADS 256
 bool instrumentationOn[MAX_NTHREADS];
@@ -174,11 +144,11 @@ VOID TurnInstrumentationOff(THREADID tid){
   instrumentationOn[tid] = false;
 }
 
-ADDRINT handleAccess( THREADID tid, ADDRINT origEA, UINT32 access ){
-   ADDRINT loc = bufs[ tid % NUMBUFS ]->handleAccess( origEA, access, 0);
-   fprintf(stderr,"Returning %16llx to the rewriter\n",loc);
+ADDRINT handleAccess( THREADID tid, ADDRINT origEA, ADDRINT asize, UINT32 access, ADDRINT instadd){
+   ADDRINT loc = bufs[ tid % NUMBUFS ]->handleAccess( origEA, access, asize, instadd);
    return loc;
 }
+
 
 VOID instrumentRoutine(RTN rtn, VOID *v){
 
@@ -187,55 +157,74 @@ VOID instrumentRoutine(RTN rtn, VOID *v){
 
 }
 
+BOOL reachedMain = false;
+VOID instrumentTrace(TRACE trace, VOID *v){
+
+  if( !reachedMain && !strcmp(RTN_Name(TRACE_Rtn( trace )).c_str(),"main") ){
+    reachedMain = true;
+    fprintf(stderr,"Reached Main!  Instrumenting from now on!\n");
+  }
+
+  if( !reachedMain ){ return; }
+
+  for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
+
+        for (INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins)) {
+
+            for (UINT32 op = 0; op<INS_MemoryOperandCount(ins); op++){
+
+                           
+              UINT32 access = 0;
+                     access = (INS_MemoryOperandIsRead(ins,op)    ? 1 : 0) |
+                              (INS_MemoryOperandIsWritten(ins,op) ? 2 : 0);
+
+
+              if( INS_SegmentPrefix(ins) == true ){ 
+
+                //continue;
+
+              } 
+
+              
+           
+              INS_InsertCall(ins, IPOINT_BEFORE,
+                             AFUNPTR(handleAccess),
+                             IARG_THREAD_ID,
+                             IARG_MEMORYOP_EA,   op,
+                             IARG_UINT32,  INS_MemoryOperandSize(ins,op),
+                             IARG_UINT32, access,
+                             IARG_INST_PTR,
+                             IARG_RETURN_REGS,   REG_INST_G0 + op, 
+                             IARG_END);
+              INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
+          
+          
+            }
+        }
+    }
+}
+
 VOID instrumentImage(IMG img, VOID *v)
 {
 
   fprintf(stderr,"Loading Image: %s\n",IMG_Name(img).c_str());
   
-  if( strstr(IMG_Name(img).c_str(),"dyld") != NULL ){ fprintf(stderr,"Not instrumenting the linker\n"); return; }
-
   //if( !IMG_IsMainExecutable(img) ){ fprintf(stderr,"Returning Early\n"); return; }
 
-  for( SEC sec= IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) ){
+/*  for( SEC sec= IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) ){
 
     for( RTN rtn= SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn) ){
 
       RTN_Open(rtn);
       for( INS ins= RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) ){
 
-        if( INS_IsStackRead( ins ) ||
-            INS_IsStackWrite( ins )
-            ){
-
-          continue;
-
-        } 
-        string s = hexstr(INS_Address(ins));
-      
-        for (UINT32 op = 0; op<INS_MemoryOperandCount(ins); op++){
-                       
-          UINT32 access = 0;
-                 access = (INS_MemoryOperandIsRead(ins,op)    ? 1 : 0) |
-                          (INS_MemoryOperandIsWritten(ins,op) ? 2 : 0);
-       
-          INS_InsertCall(ins, IPOINT_BEFORE,
-                         AFUNPTR(handleAccess),
-                         IARG_THREAD_ID,
-                         IARG_MEMORYOP_EA,   op,
-                         IARG_UINT32, access,
-                         IARG_RETURN_REGS,   regs[op], 
-                         IARG_END);
-      
-          INS_RewriteMemoryOperand(ins, op, REG(regs[op]));
-      
-        }
     
       }
       RTN_Close(rtn);
 
     }
 
-  }
+  }*/
 
 }
 
@@ -284,14 +273,9 @@ int main(int argc, char *argv[])
   for(int i = 0; i < NUMBUFS; i++){
     bufs[i] = new WriteBuffer(wbSize);
   }
-  for(int i = 0; i < 3; i++){
-    regs[i] = PIN_ClaimToolRegister();
-    assert( regs[i] != REG_INVALID() );
-  }
   
   IMG_AddInstrumentFunction(instrumentImage,0);
-  //RTN_AddInstrumentFunction(instrumentRoutine,0);
-  //INS_AddInstrumentFunction(instrumentInstruction, 0);
+  TRACE_AddInstrumentFunction(instrumentTrace,0);
 
   PIN_AddThreadStartFunction(threadBegin, 0);
   PIN_AddThreadFiniFunction(threadEnd, 0);

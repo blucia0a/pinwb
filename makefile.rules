@@ -21,6 +21,8 @@ TEST_TOOL_ROOTS := wb
 # This defines the tests to be run that were not already defined in TEST_TOOL_ROOTS.
 TEST_ROOTS :=
 
+DEBUG := 1
+
 # This defines a list of tests that should run in the "short" sanity. Tests in this list must also
 # appear either in the TEST_TOOL_ROOTS or the TEST_ROOTS list.
 # If the entire directory should be tested in sanity, assign TEST_TOOL_ROOTS and TEST_ROOTS to the
