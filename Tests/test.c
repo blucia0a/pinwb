@@ -3,7 +3,7 @@
 
 int main( int argc, char *argv[] ){
 
-  fprintf(stderr,"=====================TEST RUNNING===============\n");
+  fprintf(stderr,"+=====================Tst RUNnign=================+\n");
   return 1;
 
 }

@@ -24,8 +24,8 @@ public:
 
   
   WriteBufferEntry(){
-    this->realAddr = NULL;
-    this->realValue = NULL;
+    this->realAddr = 0;
+    this->realValue = 0;
     this->size = 0;
   }
 
@@ -70,7 +70,22 @@ public:
 
   }
 
+  VOID flushwb( ){
+
+    for( hash_map<ADDRINT,WriteBufferEntry *>::iterator i = this->map.begin(), e = this->map.end(); i != e; i++ ){
+
+      WriteBufferEntry *wbe = i->second;
+      memcpy((void*)wbe->realAddr,(void*)wbe->realValue,wbe->size);
+      delete wbe;
+
+    }
+
+    this->map.clear();
+
+  }
+
   ADDRINT handleAccess( ADDRINT origEA, UINT32 access, UINT32 asize, ADDRINT instadd){
+
 
       //REG_SEG_GS/FS_BASE
       if( this->map.find( origEA ) != this->map.end() ){
@@ -92,7 +107,7 @@ public:
       } else {
 
         /*It was not in the write buffer*/
-        if( access == 1 ){
+        if( access == 1 || access == 3 ){
 
           //fprintf(stderr,"Warning: Reading Uninitialized Memory! %016llx @ %016llx\n",origEA, instadd);
           return origEA;
@@ -105,12 +120,10 @@ public:
  
         this->map[ origEA ] = wbe;
 
-
-
       }
       
-      assert( asize <= this->map[ origEA ]->size );
       //fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==1?"R":(access==2?"W":"R/W")),origEA,this->map[ origEA ]->realValue,asize,instadd);
+      assert( asize <= this->map[ origEA ]->size );
       return this->map[ origEA ]->realValue;
 
 
@@ -144,32 +157,46 @@ VOID TurnInstrumentationOff(THREADID tid){
   instrumentationOn[tid] = false;
 }
 
+VOID flushwb(THREADID tid){
+
+  bufs[tid % NUMBUFS]->flushwb();
+
+}
+
 ADDRINT handleAccess( THREADID tid, ADDRINT origEA, ADDRINT asize, UINT32 access, ADDRINT instadd){
+
    ADDRINT loc = bufs[ tid % NUMBUFS ]->handleAccess( origEA, access, asize, instadd);
    return loc;
+
 }
 
 
 VOID instrumentRoutine(RTN rtn, VOID *v){
 
   //TODO: Add code to cause fences to flush the store buffer
-
+  
+  
 
 }
 
 BOOL reachedMain = false;
 VOID instrumentTrace(TRACE trace, VOID *v){
 
-  if( !reachedMain && !strcmp(RTN_Name(TRACE_Rtn( trace )).c_str(),"main") ){
-    reachedMain = true;
-    fprintf(stderr,"Reached Main!  Instrumenting from now on!\n");
+  if( !IMG_IsMainExecutable( SEC_Img( RTN_Sec( TRACE_Rtn(trace) ) ) ) ){
+    return;
   }
-
-  if( !reachedMain ){ return; }
 
   for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
 
         for (INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins)) {
+
+
+ 
+            if( INS_IsStackRead( ins ) || INS_IsStackWrite( ins )){
+              
+                continue;
+
+            }
 
             for (UINT32 op = 0; op<INS_MemoryOperandCount(ins); op++){
 
@@ -181,12 +208,13 @@ VOID instrumentTrace(TRACE trace, VOID *v){
 
               if( INS_SegmentPrefix(ins) == true ){ 
 
-                //continue;
+                continue;
 
               } 
 
               
            
+              INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
               INS_InsertCall(ins, IPOINT_BEFORE,
                              AFUNPTR(handleAccess),
                              IARG_THREAD_ID,
@@ -196,7 +224,6 @@ VOID instrumentTrace(TRACE trace, VOID *v){
                              IARG_INST_PTR,
                              IARG_RETURN_REGS,   REG_INST_G0 + op, 
                              IARG_END);
-              INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
           
           
             }
@@ -208,6 +235,23 @@ VOID instrumentImage(IMG img, VOID *v)
 {
 
   fprintf(stderr,"Loading Image: %s\n",IMG_Name(img).c_str());
+  RTN lockrtn = RTN_FindByName(img, "pthread_mutex_lock");
+  if( RTN_Valid(lockrtn) ){
+    RTN_Open(lockrtn);
+    RTN_InsertCall(lockrtn, IPOINT_BEFORE, AFUNPTR(flushwb),
+                   IARG_THREAD_ID, IARG_END);
+    RTN_Close(lockrtn);
+    
+  }
+  RTN unlock = RTN_FindByName(img, "pthread_mutex_unlock");
+  if( RTN_Valid(unlock) ){
+    RTN_Open(unlock);
+    RTN_InsertCall(unlock, IPOINT_BEFORE, (AFUNPTR)flushwb,
+                   IARG_THREAD_ID, IARG_END);
+    RTN_Close(unlock);
+    
+  }
+
   
   //if( !IMG_IsMainExecutable(img) ){ fprintf(stderr,"Returning Early\n"); return; }
 
