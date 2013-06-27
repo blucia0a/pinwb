@@ -8,13 +8,13 @@
 int a;
 
 pthread_mutex_t lock;
-pthread_barrier_t bar;
+//pthread_barrier_t bar;
 
 
 void *accessorThread(void *arg){
 
   int i;
-  pthread_barrier_wait(&bar);
+  //pthread_barrier_wait(&bar);
   for(i = 0; i < MAXVAL; i++){ 
     pthread_mutex_lock(&lock);
     a++;     
@@ -29,7 +29,7 @@ int main(int argc, char *argv[]){
   a = 0;
 
   pthread_mutex_init(&lock,NULL);
-  pthread_barrier_init(&bar,NULL,2);
+  //pthread_barrier_init(&bar,NULL,2);
 
   pthread_t acc1,acc2;
   pthread_create(&acc1,NULL,accessorThread,NULL);
