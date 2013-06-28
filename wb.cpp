@@ -12,7 +12,7 @@
 #include <assert.h>
 
 #undef INST_VALID
-#undef TRACEOPS
+#define TRACEOPS
 #undef NOFLUSH
 #undef SHOWIMGLOAD
 #define NUMBUFS 64
@@ -22,9 +22,9 @@
 #define READWRITE 3
 
 
-#define BLOCKSIZE 64 /*64 Byte Blocks*/
-#define BLOCKMASK 0xFFFFFFFFFFFFFFC0 /* ^0b111111 */
-#define INDEXMASK 0x3F /* 0b111111 */
+#define BLOCKSIZE 256 /*64 Byte Blocks*/
+#define BLOCKMASK 0xFFFFFFFFFFFFFF00 /* ^0b11111111 */
+#define INDEXMASK 0xFF /* 0b11111111 */
 
 using __gnu_cxx::hash_map;
 
@@ -403,6 +403,7 @@ VOID instrumentInstruction(INS ins, VOID *v){
 }
 
 VOID threadBegin(THREADID threadid, CONTEXT *ctxt, INT32 flags, VOID *v){
+  fprintf(stderr,"Oooooooooooooo!\n");
   instrumentationOn[threadid] = true;
 }
     
