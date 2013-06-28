@@ -12,11 +12,10 @@
 #include <assert.h>
 
 #undef INST_VALID
-#undef SHOWIMGLOAD
-#define WARNSIZE
-#define TRACEOPS
-#define NUMBUFS 64
+#undef TRACEOPS
 #undef NOFLUSH
+#undef SHOWIMGLOAD
+#define NUMBUFS 64
 
 #define READ 1
 #define WRITE 2
@@ -145,8 +144,7 @@ public:
 
         }
 
-        ADDRINT wbStorage = (ADDRINT)malloc(asize < 8 ? 8 : asize); 
-        memset((void*)wbStorage,asize < 8 ? 8 : asize, 0);
+        ADDRINT wbStorage = (ADDRINT)malloc(asize); 
         
         WriteBufferEntry *wbe = new WriteBufferEntry(origEA, wbStorage, asize);
  
@@ -157,11 +155,7 @@ public:
       #ifdef TRACEOPS      
       fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,this->map[ origEA ]->realValue,asize,instadd);
       #endif
-      if( asize > this->map[ origEA ]->size ){
-        #ifdef WARNSIZE
-        fprintf(stderr,"Access of size %d to block of size %d\n",asize,this->map[ origEA ]->size);
-        #endif
-      }
+      assert( asize <= this->map[ origEA ]->size );
       return this->map[ origEA ]->realValue;
 
 
