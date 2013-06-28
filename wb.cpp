@@ -22,9 +22,9 @@
 #define READWRITE 3
 
 
-#define BLOCKSIZE 256 /*64 Byte Blocks*/
-#define BLOCKMASK 0xFFFFFFFFFFFFFF00 /* ^0b11111111 */
-#define INDEXMASK 0xFF /* 0b11111111 */
+#define BLOCKSIZE 64/*64 Byte Blocks*/
+#define BLOCKMASK 0xFFFFFFFFFFFFFFC0 /* ^0b11111111 */
+#define INDEXMASK 0x3F /* 0b11111111 */
 
 using __gnu_cxx::hash_map;
 
@@ -157,6 +157,8 @@ public:
         assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
       }
 
+      /*TODO: In the unaligned case, we need to allocate a new piece of memory, put the part of each of the blocks we need into it, pass it back to the program, and then after the access, deallocate it.  That is going to SUCK*/
+
       if( this->map.find( blockAddr ) == this->map.end() ){
         /*It was not in the write buffer*/
 
@@ -199,16 +201,16 @@ public:
         WriteBufferEntry *wbe = this->map[ blockAddr ];
         ADDRINT wbStorage = wbe->realValue;
         
-        /*0: Consistency check -- better be all valid (in wb) or all invalid (not in wb)*/
-        int status = -1;
-        for(unsigned i = index; i < index + asize; i++){
-          if( status == -1 ){
-            status = wbe->valid[i] ? 1 : 0;
-          }
-          assert( status == (wbe->valid[i] ? 1 : 0) );
-        } 
 
         if( access == READ ){
+          /*0: Consistency check -- better be all valid (in wb) or all invalid (not in wb)*/
+          int status = -1;
+          for(unsigned i = index; i < index + asize; i++){
+            if( status == -1 ){
+              status = wbe->valid[i] ? 1 : 0;
+            }
+            assert( status == (wbe->valid[i] ? 1 : 0) );
+          } 
 
           if( status == 0 ){
 
@@ -324,21 +326,18 @@ VOID instrumentTrace(TRACE trace, VOID *v){
 
       }else{
 
-       /* if(!IMG_IsMainExecutable(img)){
+        /*if(!IMG_IsMainExecutable(img)){
 
           #ifdef INST_VALID
           fprintf(stderr,".");
           #endif
-          return;
+          return;*/
 
-        }else{
-        */
+        //}else{
           #ifdef INST_VALID 
           fprintf(stderr,"Instrumenting %s\n",IMG_Name(img).c_str());
           #endif
-        /*
-        }
-        */
+        //}
 
       }
 
