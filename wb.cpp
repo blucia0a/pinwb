@@ -21,6 +21,11 @@
 #define WRITE 2
 #define READWRITE 3
 
+
+#define BLOCKSIZE 64 /*64 Byte Blocks*/
+#define BLOCKMASK 0xFFFFFFFFFFFFFFC0 /* ^0b111111 */
+#define INDEXMASK 0x3F /* 0b111111 */
+
 using __gnu_cxx::hash_map;
 
 #ifdef __APPLE__ 
@@ -48,18 +53,36 @@ public:
   ADDRINT realAddr;
   ADDRINT realValue;
   UINT32 size;
+  bool valid[BLOCKSIZE];
 
   
   WriteBufferEntry(){
     this->realAddr = 0;
     this->realValue = 0;
     this->size = 0;
+    for(int i = 0; i < BLOCKSIZE; i++){
+      this->valid[i] = false;
+    }
   }
 
   WriteBufferEntry(ADDRINT a, ADDRINT v, UINT32 size){
-    this->realAddr = a;
+    this->realAddr = a & BLOCKMASK;
     this->realValue = v;
     this->size = size;
+
+    for(int i = 0; i < BLOCKSIZE; i++){
+      this->valid[i] = false;
+    }
+
+    unsigned index = a & INDEXMASK;
+    if( index + size > BLOCKSIZE ){
+      fprintf(stderr,"%u + %u > %d\n",index,size,BLOCKSIZE);
+      assert( "Unaligned Access!" && ((index + size) <= BLOCKSIZE) );
+    }
+    for(unsigned i = index; i < index + size; i++){
+      this->valid[i] = true;
+    }
+
   }
 
   ADDRINT getAddr(){
@@ -106,7 +129,11 @@ public:
     for( hash_map<ADDRINT,WriteBufferEntry *>::iterator i = this->map.begin(), e = this->map.end(); i != e; i++ ){
 
       WriteBufferEntry *wbe = i->second;
-      memcpy((void*)wbe->realAddr,(void*)wbe->realValue,wbe->size);
+      for(int v = 0; v < BLOCKSIZE; v++){
+        if( wbe->valid[v] ){
+          memcpy((void*)(wbe->realAddr + v), (void*)(wbe->realValue + v), 1);
+        }
+      }
       delete wbe;
 
     }
@@ -118,51 +145,84 @@ public:
   ADDRINT handleAccess( ADDRINT origEA, UINT32 access, UINT32 asize, ADDRINT instadd){
 
 
-      //REG_SEG_GS/FS_BASE
-      if( this->map.find( origEA ) != this->map.end() ){
+      /*Default Behavior - return origEA.*/
+      ADDRINT retVal = origEA;
 
-        /*It is in the Write Buffer*/
-        if( access == READ ){
-        /*It was a read*/
-        } else if ( access == WRITE ){
-        /*It was a write*/
-        } else if ( access == READWRITE ){
-        /*It was a read/write*/
-        }else{
-
-          fprintf(stderr,"WARNING:Unknown access type %lu\n",(unsigned long)access);
-
-        }
       
+      ADDRINT blockAddr = origEA & BLOCKMASK;
+      unsigned long index = origEA & INDEXMASK;
 
-      } else {
-
-        /*TODO: When a large access is made to a small location, we need to find the 
-                other half of the large access, combine with the being-accessed half
-                and create a new write buffer entry that combines the two halves into
-                something the size of the large access.
-        */
-      
-        /*It was not in the write buffer*/
-        if( access == READ || access == READWRITE ){
-
-          return origEA;
-
-        }
-
-        ADDRINT wbStorage = (ADDRINT)malloc(asize); 
-        
-        WriteBufferEntry *wbe = new WriteBufferEntry(origEA, wbStorage, asize);
- 
-        this->map[ origEA ] = wbe;
-
+      /*If this fails, the access goes off the end of a block -- trouble!*/
+      if( index + asize > BLOCKSIZE ){
+        fprintf(stderr,"%lu + %u > %d\n",index,asize,BLOCKSIZE);
+        assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
       }
 
+      if( this->map.find( blockAddr ) == this->map.end() ){
+        /*It was not in the write buffer*/
+
+        if( access == READ ){
+        
+          /*strictly reading a block not in the write buffer -- we're good, just return origEA.  Use program addr.*/ 
+          return origEA;
+
+        }else {
+
+          /*It was a Write*/
+
+          /*1: Allocate write buffer block*/
+          ADDRINT wbStorage = (ADDRINT)malloc(BLOCKSIZE); 
+        
+          /*2: Initialize the block.  Mark the asize bytes that will be written dirty*/
+          /*Note: this happens in the WriteBufferEntry constructor*/
+          WriteBufferEntry *wbe = new WriteBufferEntry(origEA, wbStorage, asize);
+
+          /*3: Link the block into the write buffer structure*/ 
+          this->map[ blockAddr ] = wbe;
+
+          /*4: Get the pointer into the wbStorage that we need to return*/
+          retVal = wbStorage + index; 
+         
+          if(access == READWRITE){
+
+            /*5:Only if we're doing a read/write, copy the existing asize bytes into retVal*/
+            memcpy((void*)retVal,(void*)origEA,asize);
+            
+          }
+
+        }
+
+
+      }else{
+
+        /*This case means we're accessing something for 
+          which the block was found in the write buffer*/
+        WriteBufferEntry *wbe = this->map[ blockAddr ];
+        ADDRINT wbStorage = wbe->realValue;
+        
+        /*0: Consistency check -- better be all valid (in wb) or all invalid (not in wb)*/
+        int status = -1;
+        for(unsigned i = index; i < index + asize; i++){
+          if( status == -1 ){
+            status = wbe->valid[i] ? 1 : 0;
+          }
+          assert( status == (wbe->valid[i] ? 1 : 0) );
+        } 
+
+        /*If this fails, the access goes off the end of a block -- trouble!*/
+        if( index+asize > BLOCKSIZE ){
+          fprintf(stderr,"%lu + %u > %d\n",index,asize,BLOCKSIZE);
+          assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
+        }
+
+        retVal = wbStorage + index;
+
+      }
+      
       #ifdef TRACEOPS      
-      fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,this->map[ origEA ]->realValue,asize,instadd);
+      fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
       #endif
-      assert( asize <= this->map[ origEA ]->size );
-      return this->map[ origEA ]->realValue;
+      return retVal;
 
 
   }
