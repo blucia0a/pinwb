@@ -137,6 +137,12 @@ public:
 
       } else {
 
+        /*TODO: When a large access is made to a small location, we need to find the 
+                other half of the large access, combine with the being-accessed half
+                and create a new write buffer entry that combines the two halves into
+                something the size of the large access.
+        */
+      
         /*It was not in the write buffer*/
         if( access == READ || access == READWRITE ){
 
