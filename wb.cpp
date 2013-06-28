@@ -148,7 +148,6 @@ public:
       /*Default Behavior - return origEA.*/
       ADDRINT retVal = origEA;
 
-      
       ADDRINT blockAddr = origEA & BLOCKMASK;
       unsigned long index = origEA & INDEXMASK;
 
@@ -162,7 +161,7 @@ public:
         /*It was not in the write buffer*/
 
         if( access == READ ){
-        
+       
           /*strictly reading a block not in the write buffer -- we're good, just return origEA.  Use program addr.*/ 
           return origEA;
 
@@ -209,15 +208,36 @@ public:
           assert( status == (wbe->valid[i] ? 1 : 0) );
         } 
 
-        /*If this fails, the access goes off the end of a block -- trouble!*/
-        if( index+asize > BLOCKSIZE ){
-          fprintf(stderr,"%lu + %u > %d\n",index,asize,BLOCKSIZE);
-          assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
-        }
+        if( access == READ ){
 
-        retVal = wbStorage + index;
+          if( status == 0 ){
 
-      }
+            retVal = origEA;
+
+          }else{
+
+            retVal = wbStorage + index;
+
+          }
+
+        }else{
+
+          retVal = wbStorage + index;
+
+          for(unsigned i = index; i < index + asize; i++){
+            wbe->valid[i] = true;
+          }
+
+          if(access == READWRITE){
+
+            /*5:Only if we're doing a read/write, copy the existing asize bytes into retVal*/
+            memcpy((void*)retVal,(void*)origEA,asize);
+            
+          }
+
+        }/*end not read*/
+
+      }/*end in wb*/
       
       #ifdef TRACEOPS      
       fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
