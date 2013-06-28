@@ -26,6 +26,9 @@
 #define BLOCKMASK 0xFFFFFFFFFFFFFFC0 /* ^0b11111111 */
 #define INDEXMASK 0x3F /* 0b11111111 */
 
+unsigned long numThreads;
+PIN_LOCK numThreadsLock;
+
 using __gnu_cxx::hash_map;
 
 #ifdef __APPLE__ 
@@ -44,6 +47,44 @@ struct hash<unsigned long long> {
 }
 #endif
 #endif
+
+class unalignedRecord{
+  public:
+    bool valid;
+    bool write;
+    ADDRINT unalignedBase1;
+    ADDRINT unalignedBase2;
+    size_t unalignedSize1;
+    size_t unalignedSize2;
+    void *unalignedBlock;
+
+};
+
+class thread_data_t
+{
+
+public:
+  /*max 4 memory operands?*/
+  unalignedRecord unaligned[4];
+  thread_data_t(){
+    for(int i = 0; i < 4; i++){
+      memset(&(unaligned[i]),sizeof(unalignedRecord),0);
+    }
+  }
+
+};
+
+// key for accessing TLS storage in the threads. initialized once in main()
+static  TLS_KEY tls_key;
+
+// function to access thread-specific data
+thread_data_t* get_tls(THREADID threadid)
+{
+    thread_data_t* tdata = 
+          static_cast<thread_data_t*>(PIN_GetThreadData(tls_key, threadid));
+    return tdata;
+}
+
 
 
 class WriteBufferEntry{
@@ -75,10 +116,6 @@ public:
     }
 
     unsigned index = a & INDEXMASK;
-    if( index + size > BLOCKSIZE ){
-      fprintf(stderr,"%u + %u > %d\n",index,size,BLOCKSIZE);
-      assert( "Unaligned Access!" && ((index + size) <= BLOCKSIZE) );
-    }
     for(unsigned i = index; i < index + size; i++){
       this->valid[i] = true;
     }
@@ -142,7 +179,104 @@ public:
 
   }
 
-  ADDRINT handleAccess( ADDRINT origEA, UINT32 access, UINT32 asize, ADDRINT instadd){
+  ADDRINT handleUnaligned( THREADID tid, ADDRINT origEA, UINT32 access, UINT32 asize, ADDRINT instadd, UINT32 opno){
+
+    unsigned long index = origEA & INDEXMASK;
+
+    ADDRINT block1Addr = origEA & BLOCKMASK;
+
+    ADDRINT block2Addr = (origEA + asize - 1) & BLOCKMASK;
+
+    hash_map<ADDRINT, WriteBufferEntry *>::iterator block1i = this->map.find( block1Addr );
+    hash_map<ADDRINT, WriteBufferEntry *>::iterator block2i = this->map.find( block2Addr );
+   
+    bool block1Found = block1i == this->map.end(); 
+    bool block2Found = block2i == this->map.end(); 
+
+    WriteBufferEntry *block1 = NULL;
+    if( block1Found ){
+      block1 = block1i->second;
+    }
+    WriteBufferEntry *block2 = NULL;
+    if( block2Found ){
+      block2 = block2i->second;
+    }
+   
+    /*In all cases, we're returning a newly allocated block to the app*/
+    ADDRINT retVal = (ADDRINT)malloc(BLOCKSIZE);
+    
+    /*Now define the base and size of the two regions we need to combine*/
+    void *base1 = (void*)origEA;
+    void *base2 = (void*)block2Addr;
+    
+    //size2: overhang into block 2
+    size_t size2 = (index + asize) - BLOCKSIZE;
+    //size1: part on the end of block 1 
+    size_t size1 = asize - size2;
+
+    /*There are 4 cases*/
+    /*In each one we need to copy some bytes from b1 and some from b2*/
+    if( !block1Found && !block2Found ){
+ 
+      /*neither block is in the write buffer*/
+      /*Copy from regular memory*/
+      memcpy((void*)retVal,base1,size1);
+      memcpy((void*)(retVal+size1),base2,size2);
+
+    }else if(block1Found && block2Found){
+
+      /*Both blocks are in the write buffer*/
+      
+      memcpy((void*)retVal,(void*)block1->realValue,size1);
+      memcpy((void*)(retVal+size1),(void*)block2->realValue,size2);
+
+
+    }else if(block1Found && !block2Found){
+
+      memcpy((void*)retVal,(void*)block1->realValue,size1);
+      memcpy((void*)(retVal+size1),base2,size2);
+
+
+    }else if(!block1Found && block2Found){
+
+      memcpy((void*)retVal,base1,size1);
+      memcpy((void*)(retVal+size1),(void*)block2->realValue,size2);
+
+    }
+
+    /*Threads keep their last access so we can delete the block and 
+      keep the actual memory up to date*/
+    thread_data_t *tdata = get_tls(tid);
+
+    tdata->unaligned[opno].unalignedBlock = (void*)retVal;
+
+    tdata->unaligned[opno].valid = true;
+    tdata->unaligned[opno].write = (access == WRITE || access == READWRITE);
+    if( tdata->unaligned[opno].write){
+      /*For writes, we need the info to copy the block back*/
+
+      if( !block1Found ){
+        tdata->unaligned[opno].unalignedBase1 = (ADDRINT)base1;
+      }else{
+        tdata->unaligned[opno].unalignedBase1 = block1->realValue;
+      }
+      tdata->unaligned[opno].unalignedSize1 = size1;
+
+      if( !block2Found ){
+        tdata->unaligned[opno].unalignedBase2 = (ADDRINT)base2;
+      }else{
+        tdata->unaligned[opno].unalignedBase2 = block2->realValue;
+      }
+      tdata->unaligned[opno].unalignedSize2 = size2;
+
+    }
+   
+    return (ADDRINT)retVal;
+
+
+  }
+
+  ADDRINT handleAccess( THREADID tid, ADDRINT origEA, UINT32 access, UINT32 asize, ADDRINT instadd, UINT32 opno){
 
 
       /*Default Behavior - return origEA.*/
@@ -153,8 +287,16 @@ public:
 
       /*If this fails, the access goes off the end of a block -- trouble!*/
       if( index + asize > BLOCKSIZE ){
-        fprintf(stderr,"%lu + %u > %d\n",index,asize,BLOCKSIZE);
-        assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
+
+        //assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
+        //fprintf(stderr,"%lu + %u > %d\n",index,asize,BLOCKSIZE);
+        //fprintf(stderr, "Unaligned Access!\n");
+        retVal = handleUnaligned(tid, origEA, access, asize, instadd, opno); 
+        #ifdef TRACEOPS      
+        fprintf(stderr,"UA %s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
+        #endif
+        return retVal;
+
       }
 
       /*TODO: In the unaligned case, we need to allocate a new piece of memory, put the part of each of the blocks we need into it, pass it back to the program, and then after the access, deallocate it.  That is going to SUCK*/
@@ -251,6 +393,7 @@ public:
 
 };
 
+
 WriteBuffer **bufs;
 #define MAX_NTHREADS 256
 bool instrumentationOn[MAX_NTHREADS];
@@ -283,9 +426,31 @@ VOID flushwb(THREADID tid){
 
 }
 
-ADDRINT handleAccess( THREADID tid, ADDRINT origEA, ADDRINT asize, UINT32 access, ADDRINT instadd){
+VOID cleanupAccess( THREADID tid){
 
-   ADDRINT loc = bufs[ tid % NUMBUFS ]->handleAccess( origEA, access, asize, instadd);
+  thread_data_t *tdata = get_tls(tid);
+  for(int i = 0; i < 4; i++){
+
+    if(tdata->unaligned[i].valid){
+
+      if(tdata->unaligned[i].write){
+        memcpy(tdata->unaligned[i].unalignedBlock,(void*)(tdata->unaligned[i].unalignedBase1),tdata->unaligned[i].unalignedSize1);
+        memcpy((void*)((ADDRINT)tdata->unaligned[i].unalignedBlock + tdata->unaligned[i].unalignedSize1),(void*)(tdata->unaligned[i].unalignedBase2),tdata->unaligned[i].unalignedSize2);
+      }
+
+      free(tdata->unaligned[i].unalignedBlock);
+      tdata->unaligned[i].valid = false;
+      tdata->unaligned[i].write = false;
+
+    }
+
+  } 
+
+}
+
+ADDRINT handleAccess( THREADID tid, ADDRINT origEA, ADDRINT asize, UINT32 access, ADDRINT instadd, UINT32 opno){
+
+   ADDRINT loc = bufs[ tid % NUMBUFS ]->handleAccess( tid, origEA, access, asize, instadd, opno);
    return loc;
 
 }
@@ -395,12 +560,19 @@ VOID instrumentTrace(TRACE trace, VOID *v){
                              IARG_UINT32,  INS_MemoryOperandSize(ins,op),
                              IARG_UINT32, access,
                              IARG_INST_PTR,
+                             IARG_UINT32, op,
                              IARG_RETURN_REGS,   REG_INST_G0 + op, 
                              IARG_END);
               INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
           
           
             }
+
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                           AFUNPTR(cleanupAccess),
+                           IARG_THREAD_ID,
+                           IARG_UINT32, INS_MemoryOperandCount(ins),
+                           IARG_END);
         }
     }
 }
@@ -423,8 +595,16 @@ VOID instrumentInstruction(INS ins, VOID *v){
 }
 
 VOID threadBegin(THREADID threadid, CONTEXT *ctxt, INT32 flags, VOID *v){
-  fprintf(stderr,"Oooooooooooooo!\n");
-  instrumentationOn[threadid] = true;
+
+    GetLock(&numThreadsLock, threadid+1);
+    numThreads++;
+    ReleaseLock(&numThreadsLock);
+
+    thread_data_t* tdata = new thread_data_t;
+
+    PIN_SetThreadData(tls_key, tdata, threadid);
+
+
 }
     
 VOID threadEnd(THREADID threadid, const CONTEXT *ctxt, INT32 code, VOID *v)
@@ -457,6 +637,12 @@ int main(int argc, char *argv[])
   if( PIN_Init(argc,argv) ) {
     return usage();
   }
+
+ // Initialize the lock
+  InitLock(&numThreadsLock);
+
+    // Obtain  a key for TLS storage.
+  tls_key = PIN_CreateThreadDataKey(0);
 
   int wbSize = KnobWBSize.Value();
   bufs = new WriteBuffer*[NUMBUFS];
