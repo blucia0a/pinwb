@@ -186,24 +186,41 @@ public:
     ADDRINT block1Addr = origEA & BLOCKMASK;
 
     ADDRINT block2Addr = (origEA + asize - 1) & BLOCKMASK;
+    
+    fprintf(stderr,"Checking the WB for %016llx and %016llx\n",block1Addr,block2Addr);
 
     hash_map<ADDRINT, WriteBufferEntry *>::iterator block1i = this->map.find( block1Addr );
     hash_map<ADDRINT, WriteBufferEntry *>::iterator block2i = this->map.find( block2Addr );
+    
    
     bool block1Found = block1i == this->map.end(); 
     bool block2Found = block2i == this->map.end(); 
 
+
     WriteBufferEntry *block1 = NULL;
+
+    fprintf(stderr,"checking block 1 presence!\n");
     if( block1Found ){
+      fprintf(stderr,"block 1 present!\n");
       block1 = block1i->second;
+    }else{
+      fprintf(stderr,"block 1 not present!\n");
     }
+    
+    fprintf(stderr,"checking block 2 presence!\n");
     WriteBufferEntry *block2 = NULL;
     if( block2Found ){
+      fprintf(stderr,"block 2 present!\n");
       block2 = block2i->second;
+    }else{
+      fprintf(stderr,"block 2 not present!\n");
     }
+    fprintf(stderr,"done checking block presence\n");
    
     /*In all cases, we're returning a newly allocated block to the app*/
-    ADDRINT retVal = (ADDRINT)malloc(BLOCKSIZE);
+    ADDRINT retVal = (ADDRINT)malloc(asize);
+    memset((void*)retVal,asize,0);
+   
     
     /*Now define the base and size of the two regions we need to combine*/
     void *base1 = (void*)origEA;
@@ -214,31 +231,38 @@ public:
     //size1: part on the end of block 1 
     size_t size1 = asize - size2;
 
+    fprintf(stderr,"Unaligned: %lu bytes @ %016llx + %lu bytes @ %016llx\n",size1,base1,size2,base2);
+
     /*There are 4 cases*/
     /*In each one we need to copy some bytes from b1 and some from b2*/
     if( !block1Found && !block2Found ){
+
+      fprintf(stderr,"Not found \n");
  
       /*neither block is in the write buffer*/
       /*Copy from regular memory*/
       memcpy((void*)retVal,base1,size1);
       memcpy((void*)(retVal+size1),base2,size2);
+      fprintf(stderr,"%016lx\n",*((unsigned long *)retVal));
 
     }else if(block1Found && block2Found){
 
       /*Both blocks are in the write buffer*/
-      
+      fprintf(stderr,"both found!\n"); 
       memcpy((void*)retVal,(void*)block1->realValue,size1);
       memcpy((void*)(retVal+size1),(void*)block2->realValue,size2);
 
 
     }else if(block1Found && !block2Found){
 
+      fprintf(stderr,"block1 found!\n"); 
       memcpy((void*)retVal,(void*)block1->realValue,size1);
       memcpy((void*)(retVal+size1),base2,size2);
 
 
     }else if(!block1Found && block2Found){
 
+      fprintf(stderr,"block2 found!\n"); 
       memcpy((void*)retVal,base1,size1);
       memcpy((void*)(retVal+size1),(void*)block2->realValue,size2);
 
@@ -248,26 +272,58 @@ public:
       keep the actual memory up to date*/
     thread_data_t *tdata = get_tls(tid);
 
+    fprintf(stderr,"opno %d\n",opno);
     tdata->unaligned[opno].unalignedBlock = (void*)retVal;
 
     tdata->unaligned[opno].valid = true;
+
     tdata->unaligned[opno].write = (access == WRITE || access == READWRITE);
+
     if( tdata->unaligned[opno].write){
       /*For writes, we need the info to copy the block back*/
 
       if( !block1Found ){
-        tdata->unaligned[opno].unalignedBase1 = (ADDRINT)base1;
+        /*create a new block*/
+        /*1: Allocate write buffer block*/
+        ADDRINT wbStorage = (ADDRINT)malloc(BLOCKSIZE); 
+        
+        /*2: Initialize the block.  Mark the asize bytes that will be written dirty*/
+        /*Note: this happens in the WriteBufferEntry constructor*/
+        WriteBufferEntry *wbe = new WriteBufferEntry(origEA, wbStorage, size1);
+
+        /*3: Link the block into the write buffer structure*/ 
+        this->map[ block1Addr ] = wbe;
+
+        tdata->unaligned[opno].unalignedBase1 = this->map[block1Addr]->realValue;
+
       }else{
         tdata->unaligned[opno].unalignedBase1 = block1->realValue;
       }
       tdata->unaligned[opno].unalignedSize1 = size1;
 
       if( !block2Found ){
-        tdata->unaligned[opno].unalignedBase2 = (ADDRINT)base2;
+
+        /*create a new block*/
+        /*1: Allocate write buffer block*/
+        ADDRINT wbStorage = (ADDRINT)malloc(BLOCKSIZE); 
+        
+        /*2: Initialize the block.  Mark the asize bytes that will be written dirty*/
+        /*Note: this happens in the WriteBufferEntry constructor*/
+        WriteBufferEntry *wbe = new WriteBufferEntry(block2Addr, wbStorage, size2);
+
+        /*3: Link the block into the write buffer structure*/ 
+        this->map[ block2Addr ] = wbe;
+        
+        tdata->unaligned[opno].unalignedBase2 = this->map[block2Addr]->realValue;
+
       }else{
+
         tdata->unaligned[opno].unalignedBase2 = block2->realValue;
+
       }
+
       tdata->unaligned[opno].unalignedSize2 = size2;
+      fprintf(stderr,"Unaligned: Copying back %lu bytes @ %016llx + %lu bytes @ %016llx\n",tdata->unaligned[opno].unalignedSize1,tdata->unaligned[opno].unalignedBase1,tdata->unaligned[opno].unalignedSize2,tdata->unaligned[opno].unalignedBase2);
 
     }
    
@@ -291,6 +347,7 @@ public:
         //assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
         //fprintf(stderr,"%lu + %u > %d\n",index,asize,BLOCKSIZE);
         //fprintf(stderr, "Unaligned Access!\n");
+        fprintf(stderr,"starting a new unaligned %s of %d bytes to %016llx @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),asize,origEA,instadd);
         retVal = handleUnaligned(tid, origEA, access, asize, instadd, opno); 
         #ifdef TRACEOPS      
         fprintf(stderr,"UA %s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
@@ -433,14 +490,21 @@ VOID cleanupAccess( THREADID tid){
 
     if(tdata->unaligned[i].valid){
 
+      fprintf(stderr,"Thread %lu cleaning up an unaligned access\n",(unsigned long)tid);
+
       if(tdata->unaligned[i].write){
+        fprintf(stderr,"It was a write!\n");
+
         memcpy(tdata->unaligned[i].unalignedBlock,(void*)(tdata->unaligned[i].unalignedBase1),tdata->unaligned[i].unalignedSize1);
         memcpy((void*)((ADDRINT)tdata->unaligned[i].unalignedBlock + tdata->unaligned[i].unalignedSize1),(void*)(tdata->unaligned[i].unalignedBase2),tdata->unaligned[i].unalignedSize2);
+        
+        fprintf(stderr,"Unaligned: Copied back %lu bytes @ %016llx + %lu bytes @ %016llx\n",tdata->unaligned[i].unalignedSize1,tdata->unaligned[i].unalignedBase1,tdata->unaligned[i].unalignedSize2,tdata->unaligned[i].unalignedBase2);
       }
 
-      free(tdata->unaligned[i].unalignedBlock);
+      //free(tdata->unaligned[i].unalignedBlock);
       tdata->unaligned[i].valid = false;
       tdata->unaligned[i].write = false;
+      fprintf(stderr,"Freed the unaligned block\n");
 
     }
 
