@@ -163,7 +163,7 @@ public:
         if( access == READ ){
        
           /*strictly reading a block not in the write buffer -- we're good, just return origEA.  Use program addr.*/ 
-          return origEA;
+          retVal = origEA;
 
         }else {
 
@@ -324,7 +324,7 @@ VOID instrumentTrace(TRACE trace, VOID *v){
 
       }else{
 
-        if(!IMG_IsMainExecutable(img)){
+       /* if(!IMG_IsMainExecutable(img)){
 
           #ifdef INST_VALID
           fprintf(stderr,".");
@@ -332,12 +332,13 @@ VOID instrumentTrace(TRACE trace, VOID *v){
           return;
 
         }else{
-
+        */
           #ifdef INST_VALID 
           fprintf(stderr,"Instrumenting %s\n",IMG_Name(img).c_str());
           #endif
-
+        /*
         }
+        */
 
       }
 
@@ -388,7 +389,6 @@ VOID instrumentTrace(TRACE trace, VOID *v){
 
               
            
-              INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
               INS_InsertCall(ins, IPOINT_BEFORE,
                              AFUNPTR(handleAccess),
                              IARG_THREAD_ID,
@@ -398,6 +398,7 @@ VOID instrumentTrace(TRACE trace, VOID *v){
                              IARG_INST_PTR,
                              IARG_RETURN_REGS,   REG_INST_G0 + op, 
                              IARG_END);
+              INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
           
           
             }
