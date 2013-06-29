@@ -12,8 +12,8 @@
 #include <assert.h>
 
 #undef INST_VALID
-#define TRACEOPS
-#define NOFLUSH
+#undef TRACEOPS
+#undef NOFLUSH
 #undef SHOWIMGLOAD
 #define NUMBUFS 64
 
@@ -404,16 +404,18 @@ public:
 
           retVal = wbStorage + index;
 
+
           for(unsigned i = index; i < index + asize; i++){
+
+            if( access == READWRITE && wbe->valid[i] == false ){
+              memcpy((void*)((ADDRINT)wbStorage + i), (void*)((ADDRINT)blockAddr + i), 1);
+            }
+
             wbe->valid[i] = true;
+
           }
-
-          if(access == READWRITE){
-
-            /*5:Only if we're doing a read/write, copy the existing asize bytes into retVal*/
-            memcpy((void*)retVal,(void*)origEA,asize);
             
-          }
+
 
         }/*end not read*/
 
