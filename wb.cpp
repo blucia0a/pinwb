@@ -68,7 +68,8 @@ public:
   unalignedRecord unaligned[4];
   thread_data_t(){
     for(int i = 0; i < 4; i++){
-      memset(&(unaligned[i]),sizeof(unalignedRecord),0);
+      unaligned[i].valid = false;
+      unaligned[i].write = false;
     }
   }
 
@@ -187,35 +188,25 @@ public:
 
     ADDRINT block2Addr = (origEA + asize - 1) & BLOCKMASK;
     
-    fprintf(stderr,"Checking the WB for %016llx and %016llx\n",block1Addr,block2Addr);
-
     hash_map<ADDRINT, WriteBufferEntry *>::iterator block1i = this->map.find( block1Addr );
     hash_map<ADDRINT, WriteBufferEntry *>::iterator block2i = this->map.find( block2Addr );
-    
    
-    bool block1Found = block1i == this->map.end(); 
-    bool block2Found = block2i == this->map.end(); 
-
+    bool block1Found = block1i != this->map.end(); 
+    bool block2Found = block2i != this->map.end(); 
 
     WriteBufferEntry *block1 = NULL;
-
-    fprintf(stderr,"checking block 1 presence!\n");
     if( block1Found ){
-      fprintf(stderr,"block 1 present!\n");
+
       block1 = block1i->second;
-    }else{
-      fprintf(stderr,"block 1 not present!\n");
+
     }
     
-    fprintf(stderr,"checking block 2 presence!\n");
     WriteBufferEntry *block2 = NULL;
     if( block2Found ){
-      fprintf(stderr,"block 2 present!\n");
+
       block2 = block2i->second;
-    }else{
-      fprintf(stderr,"block 2 not present!\n");
+
     }
-    fprintf(stderr,"done checking block presence\n");
    
     /*In all cases, we're returning a newly allocated block to the app*/
     ADDRINT retVal = (ADDRINT)malloc(asize);
@@ -227,8 +218,8 @@ public:
     void *base2 = (void*)block2Addr;
     
     //size2: overhang into block 2
-    size_t size2 = (index + asize) - BLOCKSIZE;
     //size1: part on the end of block 1 
+    size_t size2 = (index + asize) - BLOCKSIZE;
     size_t size1 = asize - size2;
 
     fprintf(stderr,"Unaligned: %lu bytes @ %016llx + %lu bytes @ %016llx\n",size1,base1,size2,base2);
@@ -237,8 +228,6 @@ public:
     /*In each one we need to copy some bytes from b1 and some from b2*/
     if( !block1Found && !block2Found ){
 
-      fprintf(stderr,"Not found \n");
- 
       /*neither block is in the write buffer*/
       /*Copy from regular memory*/
       memcpy((void*)retVal,base1,size1);
@@ -248,23 +237,21 @@ public:
     }else if(block1Found && block2Found){
 
       /*Both blocks are in the write buffer*/
-      fprintf(stderr,"both found!\n"); 
       memcpy((void*)retVal,(void*)block1->realValue,size1);
       memcpy((void*)(retVal+size1),(void*)block2->realValue,size2);
-
+      fprintf(stderr,"%016lx\n",*((unsigned long *)retVal));
 
     }else if(block1Found && !block2Found){
 
-      fprintf(stderr,"block1 found!\n"); 
       memcpy((void*)retVal,(void*)block1->realValue,size1);
       memcpy((void*)(retVal+size1),base2,size2);
-
+      fprintf(stderr,"%016lx\n",*((unsigned long *)retVal));
 
     }else if(!block1Found && block2Found){
 
-      fprintf(stderr,"block2 found!\n"); 
       memcpy((void*)retVal,base1,size1);
       memcpy((void*)(retVal+size1),(void*)block2->realValue,size2);
+      fprintf(stderr,"%016lx\n",*((unsigned long *)retVal));
 
     }
 
@@ -272,7 +259,6 @@ public:
       keep the actual memory up to date*/
     thread_data_t *tdata = get_tls(tid);
 
-    fprintf(stderr,"opno %d\n",opno);
     tdata->unaligned[opno].unalignedBlock = (void*)retVal;
 
     tdata->unaligned[opno].valid = true;
@@ -294,10 +280,12 @@ public:
         /*3: Link the block into the write buffer structure*/ 
         this->map[ block1Addr ] = wbe;
 
-        tdata->unaligned[opno].unalignedBase1 = this->map[block1Addr]->realValue;
+        tdata->unaligned[opno].unalignedBase1 = wbe->realValue + index;
 
       }else{
-        tdata->unaligned[opno].unalignedBase1 = block1->realValue;
+
+        tdata->unaligned[opno].unalignedBase1 = block1->realValue + index;
+
       }
       tdata->unaligned[opno].unalignedSize1 = size1;
 
@@ -314,15 +302,15 @@ public:
         /*3: Link the block into the write buffer structure*/ 
         this->map[ block2Addr ] = wbe;
         
-        tdata->unaligned[opno].unalignedBase2 = this->map[block2Addr]->realValue;
+        tdata->unaligned[opno].unalignedBase2 = wbe->realValue;
 
       }else{
 
         tdata->unaligned[opno].unalignedBase2 = block2->realValue;
 
       }
-
       tdata->unaligned[opno].unalignedSize2 = size2;
+
       fprintf(stderr,"Unaligned: Copying back %lu bytes @ %016llx + %lu bytes @ %016llx\n",tdata->unaligned[opno].unalignedSize1,tdata->unaligned[opno].unalignedBase1,tdata->unaligned[opno].unalignedSize2,tdata->unaligned[opno].unalignedBase2);
 
     }
@@ -344,14 +332,12 @@ public:
       /*If this fails, the access goes off the end of a block -- trouble!*/
       if( index + asize > BLOCKSIZE ){
 
-        //assert( "Unaligned Access!" && ((index + asize) <= BLOCKSIZE) );
-        //fprintf(stderr,"%lu + %u > %d\n",index,asize,BLOCKSIZE);
-        //fprintf(stderr, "Unaligned Access!\n");
-        fprintf(stderr,"starting a new unaligned %s of %d bytes to %016llx @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),asize,origEA,instadd);
         retVal = handleUnaligned(tid, origEA, access, asize, instadd, opno); 
+
         #ifdef TRACEOPS      
         fprintf(stderr,"UA %s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
         #endif
+
         return retVal;
 
       }
@@ -408,7 +394,7 @@ public:
             if( status == -1 ){
               status = wbe->valid[i] ? 1 : 0;
             }
-            assert( status == (wbe->valid[i] ? 1 : 0) );
+            //assert( status == (wbe->valid[i] ? 1 : 0) );
           } 
 
           if( status == 0 ){
@@ -493,20 +479,30 @@ VOID cleanupAccess( THREADID tid){
       fprintf(stderr,"Thread %lu cleaning up an unaligned access\n",(unsigned long)tid);
 
       if(tdata->unaligned[i].write){
-        fprintf(stderr,"It was a write!\n");
 
-        memcpy(tdata->unaligned[i].unalignedBlock,(void*)(tdata->unaligned[i].unalignedBase1),tdata->unaligned[i].unalignedSize1);
-        memcpy((void*)((ADDRINT)tdata->unaligned[i].unalignedBlock + tdata->unaligned[i].unalignedSize1),(void*)(tdata->unaligned[i].unalignedBase2),tdata->unaligned[i].unalignedSize2);
+        fprintf(stderr,"It was a write!\n");
+        memcpy(tdata->unaligned[i].unalignedBlock,
+               (void*)(tdata->unaligned[i].unalignedBase1),
+               tdata->unaligned[i].unalignedSize1);
+
+        memcpy((void*)((ADDRINT)tdata->unaligned[i].unalignedBlock + 
+                                tdata->unaligned[i].unalignedSize1),
+               (void*)(tdata->unaligned[i].unalignedBase2),
+               tdata->unaligned[i].unalignedSize2);
         
-        fprintf(stderr,"Unaligned: Copied back %lu bytes @ %016llx + %lu bytes @ %016llx\n",tdata->unaligned[i].unalignedSize1,tdata->unaligned[i].unalignedBase1,tdata->unaligned[i].unalignedSize2,tdata->unaligned[i].unalignedBase2);
+        fprintf(stderr,"Unaligned: Copied back %lu bytes @ %016llx + %lu bytes @ %016llx\n",
+                tdata->unaligned[i].unalignedSize1,
+                tdata->unaligned[i].unalignedBase1,
+                tdata->unaligned[i].unalignedSize2,
+                tdata->unaligned[i].unalignedBase2);
       }
 
-      //free(tdata->unaligned[i].unalignedBlock);
-      tdata->unaligned[i].valid = false;
-      tdata->unaligned[i].write = false;
-      fprintf(stderr,"Freed the unaligned block\n");
+      free(tdata->unaligned[i].unalignedBlock);
+      tdata->unaligned[i].unalignedBlock = NULL;
 
     }
+    tdata->unaligned[i].valid = false;
+    tdata->unaligned[i].write = false;
 
   } 
 
@@ -593,11 +589,9 @@ VOID instrumentTrace(TRACE trace, VOID *v){
 
         for (INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins)) {
 
-
- 
             if( INS_IsStackRead( ins ) || INS_IsStackWrite( ins )){
               
-                continue;
+                //continue;
 
             }
 
@@ -613,7 +607,7 @@ VOID instrumentTrace(TRACE trace, VOID *v){
 
                 continue;
 
-              } 
+              }
 
               
            
@@ -632,11 +626,12 @@ VOID instrumentTrace(TRACE trace, VOID *v){
           
             }
 
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                           AFUNPTR(cleanupAccess),
-                           IARG_THREAD_ID,
-                           IARG_UINT32, INS_MemoryOperandCount(ins),
-                           IARG_END);
+            if( INS_HasFallThrough(ins) ){
+              INS_InsertCall(ins, IPOINT_AFTER,
+                             AFUNPTR(cleanupAccess),
+                             IARG_THREAD_ID,
+                             IARG_END);
+            }
         }
     }
 }
