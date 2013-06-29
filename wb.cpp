@@ -13,7 +13,7 @@
 
 #undef INST_VALID
 #define TRACEOPS
-#undef NOFLUSH
+#define NOFLUSH
 #undef SHOWIMGLOAD
 #define NUMBUFS 64
 
@@ -335,24 +335,23 @@ public:
         retVal = handleUnaligned(tid, origEA, access, asize, instadd, opno); 
 
         #ifdef TRACEOPS      
-        fprintf(stderr,"UA %s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
+        fprintf(stderr,"UA %s: %016llx <=> B[%016llx] size %d @ %016llx val: ",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
         #endif
+        fprintf(stderr,"%016llx\n",*((unsigned long*)retVal));
 
         return retVal;
 
       }
 
-      /*TODO: In the unaligned case, we need to allocate a new piece of memory, put the part of each of the blocks we need into it, pass it back to the program, and then after the access, deallocate it.  That is going to SUCK*/
-
       if( this->map.find( blockAddr ) == this->map.end() ){
+
         /*It was not in the write buffer*/
 
         if( access == READ ){
-       
-          /*strictly reading a block not in the write buffer -- we're good, just return origEA.  Use program addr.*/ 
-          retVal = origEA;
 
-        }else {
+          retVal = origEA;       
+
+        }else{
 
           /*It was a Write*/
 
@@ -388,24 +387,18 @@ public:
         
 
         if( access == READ ){
+
           /*0: Consistency check -- better be all valid (in wb) or all invalid (not in wb)*/
-          int status = -1;
           for(unsigned i = index; i < index + asize; i++){
-            if( status == -1 ){
-              status = wbe->valid[i] ? 1 : 0;
+
+            if( wbe->valid[i] == false ){
+              memcpy((void*)((ADDRINT)wbStorage + i), (void*)((ADDRINT)blockAddr + i), 1);
+              wbe->valid[i] = true;
             }
-            //assert( status == (wbe->valid[i] ? 1 : 0) );
+
           } 
 
-          if( status == 0 ){
-
-            retVal = origEA;
-
-          }else{
-
-            retVal = wbStorage + index;
-
-          }
+          retVal = wbStorage + index;
 
         }else{
 
@@ -427,7 +420,12 @@ public:
       }/*end in wb*/
       
       #ifdef TRACEOPS      
-      fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx\n",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
+      if( retVal == origEA ){
+        fprintf(stderr,"%s: %016llx (unbuffered) size %d @ %016llx val: ",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,asize,instadd);
+      }else{
+        fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx val: ",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
+      }
+      fprintf(stderr,"%016llx\n",*((unsigned long*)retVal));
       #endif
       return retVal;
 
@@ -595,6 +593,12 @@ VOID instrumentTrace(TRACE trace, VOID *v){
 
             }
 
+            if( INS_SegmentPrefix(ins) == true ){ 
+
+              //continue;
+
+            }
+
             for (UINT32 op = 0; op<INS_MemoryOperandCount(ins); op++){
 
                            
@@ -603,14 +607,10 @@ VOID instrumentTrace(TRACE trace, VOID *v){
                               (INS_MemoryOperandIsWritten(ins,op) ? WRITE : 0);
 
 
-              if( INS_SegmentPrefix(ins) == true ){ 
-
-                continue;
-
-              }
 
               
            
+              INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
               INS_InsertCall(ins, IPOINT_BEFORE,
                              AFUNPTR(handleAccess),
                              IARG_THREAD_ID,
@@ -621,7 +621,6 @@ VOID instrumentTrace(TRACE trace, VOID *v){
                              IARG_UINT32, op,
                              IARG_RETURN_REGS,   REG_INST_G0 + op, 
                              IARG_END);
-              INS_RewriteMemoryOperand(ins, op, REG(REG_INST_G0 + op) );
           
           
             }
