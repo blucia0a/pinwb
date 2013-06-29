@@ -12,7 +12,7 @@
 #include <assert.h>
 
 #undef INST_VALID
-#undef TRACEOPS
+#define TRACEOPS
 #undef NOFLUSH
 #undef SHOWIMGLOAD
 #define NUMBUFS 64
@@ -335,7 +335,7 @@ public:
         retVal = handleUnaligned(tid, origEA, access, asize, instadd, opno); 
 
         #ifdef TRACEOPS      
-        fprintf(stderr,"UA %s: %016llx <=> B[%016llx] size %d @ %016llx val: ",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
+        fprintf(stderr,"T%lu- UA %s: %016llx <=> B[%016llx] size %d @ %016llx val: ",(unsigned long)tid,(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
         #endif
         fprintf(stderr,"%016llx\n",*((unsigned long*)retVal));
 
@@ -423,9 +423,9 @@ public:
       
       #ifdef TRACEOPS      
       if( retVal == origEA ){
-        fprintf(stderr,"%s: %016llx (unbuffered) size %d @ %016llx val: ",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,asize,instadd);
+        fprintf(stderr,"T%lu- %s: %016llx (unbuffered) size %d @ %016llx val: ",(unsigned long)tid,(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,asize,instadd);
       }else{
-        fprintf(stderr,"%s: %016llx <=> B[%016llx] size %d @ %016llx val: ",(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
+        fprintf(stderr,"T%lu- %s: %016llx <=> B[%016llx] size %d @ %016llx val: ",(unsigned long)tid,(access==READ?"R":(access==WRITE?"W":"R/W")),origEA,retVal,asize,instadd);
       }
       fprintf(stderr,"%016llx\n",*((unsigned long*)retVal));
       #endif
